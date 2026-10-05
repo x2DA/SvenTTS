@@ -5,9 +5,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define maxMessageLength 256
-#define maxMessages 10
+#define maxMessageLength 256 // Length of each message in the queue (+1).
+#define maxMessages 10 // Amount of messages in the queue.
+
+#define maxCmdLen 512 // The length of the buffer that holds the espeak-ng call.
 #define frameDelay 24000 // 40000 // 0.04 secs
+
 
 int startsWith(const char *substring, const char *string) {
 	while (*substring != '\0') {
@@ -20,6 +23,7 @@ int startsWith(const char *substring, const char *string) {
 	return 1;
 }
 
+// Skips system messages. I don't really like this.
 int isBlacklisted(const char *string) {
 	char blacklist[3] = "$\'\"";
 	while (*string != '\0') { // FIXME: Hardcoded.
@@ -35,10 +39,16 @@ int isBlacklisted(const char *string) {
 
 int main() {
 	pid_t pid = getProgramPID("svencoop_linux");
-	if (pid < 0) { return -1; }
+	if (pid < 0) {
+		printf("Could not get pid.");
+		return -1;
+	}
 
 	uptr client = getModuleBase(pid, "client.so", 0);
-	if (client < 0) { return -1; }
+	if (client < 0) {
+		printf("Could not get module.");
+		return -1;
+	}
 
 	char messageQueue[maxMessages][maxMessageLength];
 	char oldLastMessage[maxMessageLength];
@@ -46,33 +56,46 @@ int main() {
 
 	int lastMessageIndex = -1;
 	int latestMessageIndex = -1;
-	char hasButDontInclude[6] = "User: "; // String starts with this, but don't include it in the refined output, zero terminated.
-	// FIXME: Hardcoded.
 
+	char commandBuffer[maxCmdLen];
 
-	char commandBuffer[512]; // FIXME: Hardcoded.
 	while (running) {
 		// Get messages chunk.
 		readMem(pid, (client+messageArrayOffset), &messageQueue, sizeof(messageQueue));
 
-		for (latestMessageIndex = 0; latestMessageIndex <= maxMessages; latestMessageIndex++) {
-			if (messageQueue[latestMessageIndex][0] == 0) { latestMessageIndex--; break; }
+		for (latestMessageIndex = 0; latestMessageIndex < maxMessages; latestMessageIndex++) {
+			// Update latest message index.
+			if (messageQueue[latestMessageIndex][0] == 0) {
+				latestMessageIndex--;
+				break;
+			}
 		}
 
-		if (latestMessageIndex < lastMessageIndex ) { usleep(frameDelay); continue;}
+
+		// Messages expiring.
+		if (latestMessageIndex < lastMessageIndex) {
+			goto end_frame;
+		}
+
+		// Deal with repeats.
 		if (latestMessageIndex == lastMessageIndex && startsWith(oldLastMessage, messageQueue[latestMessageIndex])) {
-			usleep(frameDelay); continue;
+			goto end_frame;
+		}
+		
+		// Skips system messages.
+		if (isBlacklisted(messageQueue[latestMessageIndex])) {
+			goto end_frame;
 		}
 
-		
-		if (!startsWith(hasButDontInclude, messageQueue[latestMessageIndex]+1)) { usleep(frameDelay); continue; }
-		if (isBlacklisted(messageQueue[latestMessageIndex]+13)) { usleep(frameDelay); continue; }
-
-		snprintf(commandBuffer, sizeof(commandBuffer), "espeak-ng -s 230 -p 49 -g 2 -k 20 \"%s\"", messageQueue[latestMessageIndex]+13);
+		// Log & call espeak.
+		printf("%s\n", messageQueue[latestMessageIndex]);
+		snprintf(commandBuffer, sizeof(commandBuffer), "espeak-ng -s 230 -p 49 -g 2 -k 20 \"%s\"", messageQueue[latestMessageIndex]);
 		system(commandBuffer);
 
 		lastMessageIndex = latestMessageIndex;
 		snprintf(oldLastMessage, sizeof(oldLastMessage), "%s", messageQueue[latestMessageIndex]);
+
+		end_frame:
 		usleep(frameDelay);
 	}
 
